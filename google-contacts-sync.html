@@ -16,10 +16,17 @@
         .tab { padding: 0.5rem 1rem; border-radius: 0.5rem; font-weight: 500; cursor: pointer; background: #f3f4f6; color: #374151; white-space: nowrap; }
         .tab.active { background: #3b82f6; color: white; }
         .tab:hover:not(.active) { background: #e5e7eb; }
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 50; align-items: center; justify-content: center; }
+        .modal.open { display: flex; }
+        .modal-content { background: white; border-radius: 0.75rem; max-width: 600px; width: 90%; max-height: 90vh; overflow-y: auto; }
+        .input-field { width: 100%; padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 0.375rem; margin-top: 0.25rem; }
+        .loading-spinner { border: 3px solid #f3f4f6; border-top: 3px solid #3b82f6; border-radius: 50%; width: 24px; height: 24px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
     <div id="app"></div>
+    <div id="modal" class="modal"></div>
 
     <script>
         const CLIENT_ID = '831265054099-6jt17bkg2huo43olkg01t3vpk58kg06h.apps.googleusercontent.com'; // Replace with your actual Client ID
@@ -33,7 +40,12 @@
             analysis: null,
             activeTab: 'sync',
             selectedContacts: new Set(),
-            error: null
+            error: null,
+            loading: false,
+            loadingMessage: '',
+            nextPageToken1: null,
+            nextPageToken2: null,
+            mergeContact: null
         };
 
         function setState(newState) {
@@ -47,7 +59,9 @@
                 users: `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
                 refresh: `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>`,
                 check: `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>`,
-                arrow: `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>`
+                arrow: `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>`,
+                download: `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
+                merge: `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v3a2 2 0 0 0 2 2h9m0 0l-3-3m3 3l-3 3"/><path d="M8 21v-4a2 2 0 0 1 2-2h9m0 0l-3-3m3 3l-3 3"/></svg>`
             };
             return icons[type] || '';
         }
@@ -66,15 +80,15 @@
             try {
                 const client = window.google.accounts.oauth2.initTokenClient({
                     client_id: CLIENT_ID,
-                    scope: 'https://www.googleapis.com/auth/contacts.readonly',
+                    scope: 'https://www.googleapis.com/auth/contacts',
                     callback: async (response) => {
                         if (response.access_token) {
                             setState({ error: null });
                             if (accountNumber === 1) {
-                                setState({ account1: response });
+                                setState({ account1: response, contacts1: [], nextPageToken1: null });
                                 await fetchContacts(response.access_token, 1);
                             } else {
-                                setState({ account2: response });
+                                setState({ account2: response, contacts2: [], nextPageToken2: null });
                                 await fetchContacts(response.access_token, 2);
                             }
                         }
@@ -86,30 +100,51 @@
             }
         }
 
-        async function fetchContacts(accessToken, accountNumber) {
+        async function fetchContacts(accessToken, accountNumber, pageToken = null) {
+            setState({ loading: true, loadingMessage: `Fetching contacts for Account ${accountNumber}...` });
             try {
-                const response = await fetch(
-                    'https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers&pageSize=1000',
-                    { headers: { Authorization: `Bearer ${accessToken}` } }
-                );
+                let url = 'https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers&pageSize=1000';
+                if (pageToken) url += `&pageToken=${pageToken}`;
+
+                const response = await fetch(url, {
+                    headers: { Authorization: `Bearer ${accessToken}` }
+                });
 
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
                 const data = await response.json();
-                const contacts = (data.connections || []).map(c => ({
+                const newContacts = (data.connections || []).map(c => ({
                     id: c.resourceName,
                     name: c.names?.[0]?.displayName || 'No Name',
                     email: c.emailAddresses?.[0]?.value || '',
-                    phone: c.phoneNumbers?.[0]?.value || ''
+                    phone: c.phoneNumbers?.[0]?.value || '',
+                    raw: c
                 }));
 
                 if (accountNumber === 1) {
-                    setState({ contacts1: contacts });
+                    setState({ 
+                        contacts1: [...state.contacts1, ...newContacts],
+                        nextPageToken1: data.nextPageToken || null
+                    });
                 } else {
-                    setState({ contacts2: contacts });
+                    setState({ 
+                        contacts2: [...state.contacts2, ...newContacts],
+                        nextPageToken2: data.nextPageToken || null
+                    });
                 }
+
+                setState({ loading: false, loadingMessage: '' });
             } catch (error) {
-                setState({ error: `Failed to fetch contacts: ${error.message}` });
+                setState({ error: `Failed to fetch contacts: ${error.message}`, loading: false });
+            }
+        }
+
+        async function fetchAllContacts(accountNumber) {
+            const token = accountNumber === 1 ? state.account1.access_token : state.account2.access_token;
+            const nextToken = accountNumber === 1 ? state.nextPageToken1 : state.nextPageToken2;
+            
+            if (nextToken) {
+                await fetchContacts(token, accountNumber, nextToken);
             }
         }
 
@@ -152,17 +187,251 @@
             setState({ selectedContacts: selected });
         }
 
-        function syncSelected(direction) {
-            alert(`Would sync ${state.selectedContacts.size} contacts ${direction === 'to2' ? 'from Account 1 to 2' : 'from Account 2 to 1'}\n\nNote: Actual sync requires write permissions.`);
+        function selectAll(category) {
+            const selected = new Set();
+            if (category === 'only1') {
+                state.analysis.onlyIn1.forEach((_, i) => selected.add(`only1-${i}`));
+            } else if (category === 'only2') {
+                state.analysis.onlyIn2.forEach((_, i) => selected.add(`only2-${i}`));
+            } else if (category === 'diff') {
+                state.analysis.different.forEach((_, i) => selected.add(`diff-${i}`));
+            }
+            setState({ selectedContacts: selected });
+        }
+
+        function deselectAll() {
             setState({ selectedContacts: new Set() });
         }
 
+        async function syncSelected(direction) {
+            if (state.selectedContacts.size === 0) return;
+
+            setState({ loading: true, loadingMessage: 'Syncing contacts...' });
+
+            try {
+                const token = direction === 'to2' ? state.account2.access_token : state.account1.access_token;
+                const contactsToSync = [];
+
+                if (direction === 'to2') {
+                    state.selectedContacts.forEach(id => {
+                        const idx = parseInt(id.split('-')[1]);
+                        contactsToSync.push(state.analysis.onlyIn1[idx].contact);
+                    });
+                } else {
+                    state.selectedContacts.forEach(id => {
+                        const idx = parseInt(id.split('-')[1]);
+                        contactsToSync.push(state.analysis.onlyIn2[idx].contact);
+                    });
+                }
+
+                for (const contact of contactsToSync) {
+                    await createContact(token, contact);
+                }
+
+                alert(`Successfully synced ${contactsToSync.length} contacts!`);
+                setState({ loading: false, selectedContacts: new Set() });
+                
+                // Refresh both accounts
+                await fetchContacts(state.account1.access_token, 1);
+                await fetchContacts(state.account2.access_token, 2);
+                analyzeContacts();
+            } catch (error) {
+                setState({ error: `Sync failed: ${error.message}`, loading: false });
+            }
+        }
+
+        async function createContact(accessToken, contact) {
+            const body = {
+                names: [{ givenName: contact.name }]
+            };
+            
+            if (contact.email) {
+                body.emailAddresses = [{ value: contact.email }];
+            }
+            
+            if (contact.phone) {
+                body.phoneNumbers = [{ value: contact.phone }];
+            }
+
+            const response = await fetch('https://people.googleapis.com/v1/people:createContact', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(body)
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error?.message || 'Failed to create contact');
+            }
+
+            return await response.json();
+        }
+
+        async function updateContact(accessToken, resourceName, contact) {
+            const body = {
+                resourceName: resourceName,
+                etag: contact.raw.etag,
+                names: [{ givenName: contact.name }],
+                emailAddresses: contact.email ? [{ value: contact.email }] : [],
+                phoneNumbers: contact.phone ? [{ value: contact.phone }] : []
+            };
+
+            const response = await fetch(`https://people.googleapis.com/v1/${resourceName}:updateContact?updatePersonFields=names,emailAddresses,phoneNumbers`, {
+                method: 'PATCH',
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(body)
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error?.message || 'Failed to update contact');
+            }
+
+            return await response.json();
+        }
+
+        function openMergeModal(idx) {
+            const item = state.analysis.different[idx];
+            const merged = {
+                name: item.contact1.name || item.contact2.name,
+                email: item.contact1.email || item.contact2.email,
+                phone: item.contact1.phone || item.contact2.phone,
+                contact1: item.contact1,
+                contact2: item.contact2,
+                idx: idx
+            };
+            setState({ mergeContact: merged });
+            showModal(renderMergeModal(merged));
+        }
+
+        function updateMergeField(field, value) {
+            setState({ mergeContact: { ...state.mergeContact, [field]: value } });
+            showModal(renderMergeModal(state.mergeContact));
+        }
+
+        async function confirmMerge() {
+            setState({ loading: true, loadingMessage: 'Merging contacts...' });
+            
+            try {
+                const merged = state.mergeContact;
+                
+                // Update both accounts
+                await updateContact(state.account1.access_token, merged.contact1.id, {
+                    name: merged.name,
+                    email: merged.email,
+                    phone: merged.phone,
+                    raw: merged.contact1.raw
+                });
+
+                await updateContact(state.account2.access_token, merged.contact2.id, {
+                    name: merged.name,
+                    email: merged.email,
+                    phone: merged.phone,
+                    raw: merged.contact2.raw
+                });
+
+                closeModal();
+                alert('Contact merged successfully!');
+                setState({ loading: false, mergeContact: null });
+                
+                // Refresh
+                await fetchContacts(state.account1.access_token, 1);
+                await fetchContacts(state.account2.access_token, 2);
+                analyzeContacts();
+            } catch (error) {
+                setState({ error: `Merge failed: ${error.message}`, loading: false });
+            }
+        }
+
+        function renderMergeModal(merged) {
+            return `
+                <div class="modal-content p-6">
+                    <h2 class="text-2xl font-bold mb-4">Merge Contact</h2>
+                    
+                    <div class="grid md:grid-cols-2 gap-4 mb-6 text-sm">
+                        <div class="bg-blue-50 p-3 rounded">
+                            <p class="font-semibold text-blue-800 mb-2">Account 1</p>
+                            <p><strong>Name:</strong> ${merged.contact1.name}</p>
+                            <p><strong>Email:</strong> ${merged.contact1.email}</p>
+                            <p><strong>Phone:</strong> ${merged.contact1.phone || 'N/A'}</p>
+                        </div>
+                        <div class="bg-purple-50 p-3 rounded">
+                            <p class="font-semibold text-purple-800 mb-2">Account 2</p>
+                            <p><strong>Name:</strong> ${merged.contact2.name}</p>
+                            <p><strong>Email:</strong> ${merged.contact2.email}</p>
+                            <p><strong>Phone:</strong> ${merged.contact2.phone || 'N/A'}</p>
+                        </div>
+                    </div>
+
+                    <div class="mb-6">
+                        <h3 class="font-semibold mb-3 text-lg">Merged Contact (will be saved to both accounts)</h3>
+                        
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700">Name</label>
+                            <input type="text" value="${merged.name}" 
+                                   onchange="updateMergeField('name', this.value)"
+                                   class="input-field">
+                        </div>
+
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700">Email</label>
+                            <input type="email" value="${merged.email}" 
+                                   onchange="updateMergeField('email', this.value)"
+                                   class="input-field">
+                        </div>
+
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700">Phone</label>
+                            <input type="tel" value="${merged.phone || ''}" 
+                                   onchange="updateMergeField('phone', this.value)"
+                                   class="input-field">
+                        </div>
+                    </div>
+
+                    <div class="flex gap-3 justify-end">
+                        <button onclick="closeModal()" class="btn bg-gray-200 text-gray-700 hover:bg-gray-300">
+                            Cancel
+                        </button>
+                        <button onclick="confirmMerge()" class="btn bg-green-600 text-white hover:bg-green-700">
+                            Merge & Save to Both Accounts
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+
+        function showModal(content) {
+            document.getElementById('modal').innerHTML = content;
+            document.getElementById('modal').classList.add('open');
+        }
+
+        function closeModal() {
+            document.getElementById('modal').classList.remove('open');
+            document.getElementById('modal').innerHTML = '';
+        }
+
         function renderSetup() {
+            const hasMore1 = state.nextPageToken1 !== null;
+            const hasMore2 = state.nextPageToken2 !== null;
+
             return `
                 <div class="max-w-4xl mx-auto p-6">
                     <div class="card">
                         <h1 class="text-3xl font-bold mb-6">Google Contacts Sync Manager</h1>
                         
+                        ${state.loading ? `
+                            <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6 flex items-center gap-3">
+                                <div class="loading-spinner"></div>
+                                <span class="text-blue-700">${state.loadingMessage}</span>
+                            </div>
+                        ` : ''}
+
                         ${state.error ? `
                             <div class="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
                                 <div class="flex items-start gap-3">
@@ -186,6 +455,7 @@
                                         <li>Create OAuth 2.0 credentials (Web application)</li>
                                         <li>Add your domain to authorized JavaScript origins</li>
                                         <li>Replace YOUR_GOOGLE_CLIENT_ID in this HTML file</li>
+                                        <li>Add test users or publish the app</li>
                                     </ol>
                                 </div>
                             </div>
@@ -202,7 +472,12 @@
                                         ${icon('check', 20)}
                                         <span class="font-medium">Connected</span>
                                     </div>
-                                    <p class="text-sm text-gray-600">${state.contacts1.length} contacts</p>
+                                    <p class="text-sm text-gray-600 mb-2">${state.contacts1.length} contacts loaded</p>
+                                    ${hasMore1 ? `
+                                        <button onclick="fetchAllContacts(1)" class="btn bg-blue-600 text-white hover:bg-blue-700 text-sm mt-2" ${state.loading ? 'disabled' : ''}>
+                                            ${icon('download', 16)} Load Next 1000
+                                        </button>
+                                    ` : '<p class="text-sm text-green-600">All contacts loaded</p>'}
                                 ` : `
                                     <button onclick="handleGoogleLogin(1)" class="btn w-full bg-blue-600 text-white hover:bg-blue-700">
                                         Connect Account 1
@@ -220,7 +495,12 @@
                                         ${icon('check', 20)}
                                         <span class="font-medium">Connected</span>
                                     </div>
-                                    <p class="text-sm text-gray-600">${state.contacts2.length} contacts</p>
+                                    <p class="text-sm text-gray-600 mb-2">${state.contacts2.length} contacts loaded</p>
+                                    ${hasMore2 ? `
+                                        <button onclick="fetchAllContacts(2)" class="btn bg-purple-600 text-white hover:bg-purple-700 text-sm mt-2" ${state.loading ? 'disabled' : ''}>
+                                            ${icon('download', 16)} Load Next 1000
+                                        </button>
+                                    ` : '<p class="text-sm text-green-600">All contacts loaded</p>'}
                                 ` : `
                                     <button onclick="handleGoogleLogin(2)" class="btn w-full bg-purple-600 text-white hover:bg-purple-700">
                                         Connect Account 2
@@ -229,11 +509,15 @@
                             </div>
                         </div>
 
-                        ${state.account1 && state.account2 ? `
+                        ${state.account1 && state.account2 && !hasMore1 && !hasMore2 ? `
                             <button onclick="analyzeContacts()" class="btn w-full bg-green-600 text-white hover:bg-green-700 py-3 text-lg flex items-center justify-center gap-2">
                                 <span>${icon('refresh')}</span>
                                 Analyze Contacts
                             </button>
+                        ` : state.account1 && state.account2 ? `
+                            <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-center">
+                                <p class="text-yellow-800">Please load all contacts from both accounts before analyzing</p>
+                            </div>
                         ` : ''}
                     </div>
                 </div>
@@ -250,6 +534,7 @@
             ];
 
             let content = '';
+            let actions = '';
             
             if (state.activeTab === 'sync') {
                 content = inSync.map(item => `
@@ -265,31 +550,69 @@
                     </div>
                 `).join('') || '<p class="text-gray-500 italic">No contacts in sync</p>';
             } else if (state.activeTab === 'diff') {
-                content = different.map(item => `
-                    <div class="contact-card bg-yellow-50">
-                        <div class="grid md:grid-cols-2 gap-4">
-                            <div>
-                                <p class="text-xs font-semibold text-blue-600 mb-1">ACCOUNT 1</p>
-                                <h3 class="font-semibold">${item.contact1.name}</h3>
-                                <p class="text-sm text-gray-600">${item.contact1.email}</p>
-                                ${item.contact1.phone ? `<p class="text-sm text-gray-600">${item.contact1.phone}</p>` : ''}
+                if (different.length > 0) {
+                    actions = `
+                        <div class="mb-4 flex gap-2 flex-wrap">
+                            <button onclick="selectAll('diff')" class="btn bg-blue-600 text-white hover:bg-blue-700">
+                                Select All
+                            </button>
+                            ${state.selectedContacts.size > 0 ? `
+                                <button onclick="deselectAll()" class="btn bg-gray-600 text-white hover:bg-gray-700">
+                                    Deselect All (${state.selectedContacts.size})
+                                </button>
+                            ` : ''}
+                        </div>
+                    `;
+                }
+                content = different.map((item, idx) => {
+                    const id = `diff-${idx}`;
+                    const isSelected = state.selectedContacts.has(id);
+                    return `
+                        <div class="contact-card bg-yellow-50 ${isSelected ? 'selected' : ''}">
+                            <div class="flex items-start justify-between mb-3">
+                                <input type="checkbox" ${isSelected ? 'checked' : ''} 
+                                       onclick="toggleContact('${id}')" class="mt-1">
+                                <button onclick="openMergeModal(${idx})" 
+                                        class="btn bg-green-600 text-white hover:bg-green-700 text-sm flex items-center gap-1">
+                                    ${icon('merge', 16)} Merge
+                                </button>
                             </div>
-                            <div>
-                                <p class="text-xs font-semibold text-purple-600 mb-1">ACCOUNT 2</p>
-                                <h3 class="font-semibold">${item.contact2.name}</h3>
-                                <p class="text-sm text-gray-600">${item.contact2.email}</p>
-                                ${item.contact2.phone ? `<p class="text-sm text-gray-600">${item.contact2.phone}</p>` : ''}
+                            <div class="grid md:grid-cols-2 gap-4">
+                                <div>
+                                    <p class="text-xs font-semibold text-blue-600 mb-1">ACCOUNT 1</p>
+                                    <h3 class="font-semibold">${item.contact1.name}</h3>
+                                    <p class="text-sm text-gray-600">${item.contact1.email}</p>
+                                    ${item.contact1.phone ? `<p class="text-sm text-gray-600">${item.contact1.phone}</p>` : ''}
+                                </div>
+                                <div>
+                                    <p class="text-xs font-semibold text-purple-600 mb-1">ACCOUNT 2</p>
+                                    <h3 class="font-semibold">${item.contact2.name}</h3>
+                                    <p class="text-sm text-gray-600">${item.contact2.email}</p>
+                                    ${item.contact2.phone ? `<p class="text-sm text-gray-600">${item.contact2.phone}</p>` : ''}
+                                </div>
                             </div>
                         </div>
-                    </div>
-                `).join('') || '<p class="text-gray-500 italic">No differing contacts</p>';
+                    `;
+                }).join('') || '<p class="text-gray-500 italic">No differing contacts</p>';
             } else if (state.activeTab === 'only1') {
-                const header = state.selectedContacts.size > 0 ? `
-                    <button onclick="syncSelected('to2')" class="btn bg-purple-600 text-white hover:bg-purple-700 mb-4">
-                        Copy ${state.selectedContacts.size} to Account 2
-                    </button>
-                ` : '';
-                content = header + (onlyIn1.map((item, i) => {
+                if (onlyIn1.length > 0) {
+                    actions = `
+                        <div class="mb-4 flex gap-2 flex-wrap">
+                            <button onclick="selectAll('only1')" class="btn bg-blue-600 text-white hover:bg-blue-700">
+                                Select All
+                            </button>
+                            ${state.selectedContacts.size > 0 ? `
+                                <button onclick="deselectAll()" class="btn bg-gray-600 text-white hover:bg-gray-700">
+                                    Deselect All (${state.selectedContacts.size})
+                                </button>
+                                <button onclick="syncSelected('to2')" class="btn bg-purple-600 text-white hover:bg-purple-700" ${state.loading ? 'disabled' : ''}>
+                                    ${icon('arrow', 16)} Copy ${state.selectedContacts.size} to Account 2
+                                </button>
+                            ` : ''}
+                        </div>
+                    `;
+                }
+                content = onlyIn1.map((item, i) => {
                     const id = `only1-${i}`;
                     return `
                         <div class="contact-card selectable ${state.selectedContacts.has(id) ? 'selected' : ''}" onclick="toggleContact('${id}')">
@@ -303,14 +626,26 @@
                             </div>
                         </div>
                     `;
-                }).join('') || '<p class="text-gray-500 italic">No contacts only in Account 1</p>');
+                }).join('') || '<p class="text-gray-500 italic">No contacts only in Account 1</p>';
             } else {
-                const header = state.selectedContacts.size > 0 ? `
-                    <button onclick="syncSelected('to1')" class="btn bg-blue-600 text-white hover:bg-blue-700 mb-4">
-                        Copy ${state.selectedContacts.size} to Account 1
-                    </button>
-                ` : '';
-                content = header + (onlyIn2.map((item, i) => {
+                if (onlyIn2.length > 0) {
+                    actions = `
+                        <div class="mb-4 flex gap-2 flex-wrap">
+                            <button onclick="selectAll('only2')" class="btn bg-blue-600 text-white hover:bg-blue-700">
+                                Select All
+                            </button>
+                            ${state.selectedContacts.size > 0 ? `
+                                <button onclick="deselectAll()" class="btn bg-gray-600 text-white hover:bg-gray-700">
+                                    Deselect All (${state.selectedContacts.size})
+                                </button>
+                                <button onclick="syncSelected('to1')" class="btn bg-blue-600 text-white hover:bg-blue-700" ${state.loading ? 'disabled' : ''}>
+                                    ${icon('arrow', 16)} Copy ${state.selectedContacts.size} to Account 1
+                                </button>
+                            ` : ''}
+                        </div>
+                    `;
+                }
+                content = onlyIn2.map((item, i) => {
                     const id = `only2-${i}`;
                     return `
                         <div class="contact-card selectable ${state.selectedContacts.has(id) ? 'selected' : ''}" onclick="toggleContact('${id}')">
@@ -324,12 +659,31 @@
                             </div>
                         </div>
                     `;
-                }).join('') || '<p class="text-gray-500 italic">No contacts only in Account 2</p>');
+                }).join('') || '<p class="text-gray-500 italic">No contacts only in Account 2</p>';
             }
 
             return `
                 <div class="max-w-6xl mx-auto p-6">
                     <div class="card">
+                        ${state.loading ? `
+                            <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6 flex items-center gap-3">
+                                <div class="loading-spinner"></div>
+                                <span class="text-blue-700">${state.loadingMessage}</span>
+                            </div>
+                        ` : ''}
+
+                        ${state.error ? `
+                            <div class="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+                                <div class="flex items-start gap-3">
+                                    <span class="text-red-600">${icon('alert', 20)}</span>
+                                    <div>
+                                        <h3 class="font-semibold text-red-800">Error</h3>
+                                        <p class="text-sm text-red-700 mt-1">${state.error}</p>
+                                    </div>
+                                </div>
+                            </div>
+                        ` : ''}
+
                         <div class="flex justify-between items-center mb-6">
                             <h1 class="text-3xl font-bold">Sync Analysis</h1>
                             <button onclick="setState({ view: 'setup', selectedContacts: new Set() })" class="text-blue-600 hover:text-blue-700 font-medium">
@@ -345,6 +699,8 @@
                                 </button>
                             `).join('')}
                         </div>
+
+                        ${actions}
 
                         <div class="max-h-96 overflow-y-auto">
                             ${content}
